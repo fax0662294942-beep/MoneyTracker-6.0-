@@ -989,6 +989,7 @@
             // ============ DATI ACCOUNT CORRENTE ============
             const [transactions, setTransactions] = useState([]);
             const [budgets, setBudgets] = useState({});
+            const [currentBudgetKey, setCurrentBudgetKey] = useState('');
             const [settings, setSettings] = useState({
                 monthStartDay: 1, // Giorno di inizio mese (1-31)
                 weekStartDay: 1,  // 1 = Lunedì, 0 = Domenica
@@ -1102,14 +1103,18 @@
             useEffect(() => {
                 if (!activeAccountId) return;
                 const prefix = `account_${activeAccountId}_`;
-                localStorage.setItem(prefix + 'budgets', JSON.stringify(budgets));
-            }, [budgets, activeAccountId]);
-
-            useEffect(() => {
-                if (!activeAccountId) return;
-                const prefix = `account_${activeAccountId}_`;
                 localStorage.setItem(prefix + 'settings', JSON.stringify(settings));
             }, [settings, activeAccountId]);
+
+            // Carica budget del periodo corrente ogni volta che cambia periodo/account/settings
+            useEffect(() => {
+                if (!activeAccountId || viewMode === 'all' || viewMode === 'custom' || viewMode === 'week') return;
+                const { startDate } = getPeriodDates();
+                const key = getBudgetKey(startDate);
+                if (key === currentBudgetKey) return;
+                setCurrentBudgetKey(key);
+                setBudgets(getBudgetsForPeriod(startDate));
+            }, [activeAccountId, viewMode, periodOffset, settings.monthStartDay]);
 
             // Funzione per ottenere le date del periodo in base a viewMode e offset
             const getPeriodDates = () => {
@@ -1168,9 +1173,38 @@
                 return { startDate, endDate };
             };
 
-            // Funzione per ottenere le date del periodo personalizzato (deprecata, usa getPeriodDates)
-            const getCustomMonthDates = () => {
-                return getPeriodDates();
+            // ============ BUDGET PER PERIODO ============
+            // Chiave budget basata sulla data inizio periodo (YYYY-MM-DD)
+            const getBudgetKey = (startDate) => {
+                if (!startDate) return '';
+                const d = startDate instanceof Date ? startDate : new Date(startDate);
+                return d.toISOString().split('T')[0];
+            };
+
+            const getBudgetsForPeriod = (startDate) => {
+                if (!activeAccountId || !startDate) return {};
+                const key = `account_${activeAccountId}_budget_${getBudgetKey(startDate)}`;
+                try {
+                    const stored = localStorage.getItem(key);
+                    return stored ? JSON.parse(stored) : {};
+                } catch(e) { return {}; }
+            };
+
+            const saveBudgetsForPeriod = (startDate, budgetData) => {
+                if (!activeAccountId || !startDate) return;
+                const key = `account_${activeAccountId}_budget_${getBudgetKey(startDate)}`;
+                localStorage.setItem(key, JSON.stringify(budgetData));
+            };
+
+            // Ottieni tutte le chiavi budget per questo account
+            const getAllBudgetKeys = () => {
+                const prefix = `account_${activeAccountId}_budget_`;
+                const keys = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (k && k.startsWith(prefix)) keys.push(k);
+                }
+                return keys.sort();
             };
 
             // Filtra transazioni per conto
@@ -1253,11 +1287,16 @@
             };
 
             const setBudget = (category, amount) => {
-                setBudgets({ ...budgets, [category]: parseFloat(amount) });
+                const { startDate } = getPeriodDates();
+                const newB = { ...budgets, [category]: parseFloat(amount) };
+                setBudgets(newB);
+                saveBudgetsForPeriod(startDate, newB);
             };
 
             const setAllBudgets = (newBudgets) => {
+                const { startDate } = getPeriodDates();
                 setBudgets({ ...newBudgets });
+                saveBudgetsForPeriod(startDate, newBudgets);
             };
 
             const updateSettings = (newSettings) => {
@@ -2401,6 +2440,15 @@
                             onSetAllBudgets={setAllBudgets}
                             transactions={transactions}
                             settings={settings}
+                            periodStart={getPeriodDates().startDate}
+                            getPrevPeriodBudgets={() => {
+                                // Calcola il periodo precedente
+                                const { startDate } = getPeriodDates();
+                                const startDay = settings.monthStartDay || 1;
+                                const prevStart = new Date(startDate);
+                                prevStart.setMonth(prevStart.getMonth() - 1);
+                                return getBudgetsForPeriod(prevStart);
+                            }}
                         />
                     )}
 
@@ -3953,13 +4001,22 @@
             );
         }
 
-        function SetBudgetModal({ onClose, budgets, onSetBudget, onSetAllBudgets, transactions, settings }) {
+        function SetBudgetModal({ onClose, budgets, onSetBudget, onSetAllBudgets, transactions, settings, periodStart, getPrevPeriodBudgets }) {
             const [amounts, setAmounts] = useState({});
             const [copied, setCopied] = useState(false);
             const cats = getCategoriesFromStorage().expense.filter(c => !c.archived);
 
+            // Formato periodo per il titolo
+            const periodLabel = (() => {
+                if (!periodStart) return '';
+                const start = new Date(periodStart);
+                const end = new Date(start);
+                end.setMonth(end.getMonth() + 1);
+                end.setDate(end.getDate() - 1);
+                return `${start.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+            })();
+
             useEffect(() => {
-                // Precarica i budget esistenti
                 const initial = {};
                 cats.forEach(c => {
                     if (budgets[c.id]) initial[c.id] = String(budgets[c.id]);
@@ -3978,49 +4035,65 @@
             };
 
             const handleCopyPrevMonth = () => {
-                // Calcola il mese precedente in base alle impostazioni
-                const today = new Date();
-                const startDay = settings?.monthStartDay || 1;
-                let prevStart, prevEnd;
-                if (today.getDate() >= startDay) {
-                    prevStart = new Date(today.getFullYear(), today.getMonth() - 1, startDay);
-                    prevEnd   = new Date(today.getFullYear(), today.getMonth(), startDay - 1, 23, 59, 59);
-                } else {
-                    prevStart = new Date(today.getFullYear(), today.getMonth() - 2, startDay);
-                    prevEnd   = new Date(today.getFullYear(), today.getMonth() - 1, startDay - 1, 23, 59, 59);
-                }
+                // Prendi i budget salvati del periodo precedente
+                const prevBudgets = getPrevPeriodBudgets ? getPrevPeriodBudgets() : {};
+                const hasPrev = Object.keys(prevBudgets).length > 0;
 
-                // Calcola quanto speso per categoria nel mese precedente
-                const prevSpese = {};
-                transactions
-                    .filter(t => t.type === 'expense' && new Date(t.date) >= prevStart && new Date(t.date) <= prevEnd)
-                    .forEach(t => {
-                        prevSpese[t.category] = (prevSpese[t.category] || 0) + t.amount;
+                if (hasPrev) {
+                    // Copia i budget del periodo precedente
+                    const newAmounts = {};
+                    cats.forEach(c => {
+                        if (prevBudgets[c.id]) newAmounts[c.id] = String(prevBudgets[c.id]);
                     });
-
-                // Copia i budget del mese precedente (se esistono), altrimenti usa la spesa reale arrotondata
-                const newAmounts = { ...amounts };
-                cats.forEach(c => {
-                    if (budgets[c.id]) {
-                        newAmounts[c.id] = String(budgets[c.id]);
-                    } else if (prevSpese[c.id]) {
-                        // Arrotonda al 10 superiore come suggerimento
-                        newAmounts[c.id] = String(Math.ceil(prevSpese[c.id] / 10) * 10);
-                    }
-                });
-                setAmounts(newAmounts);
+                    setAmounts(newAmounts);
+                } else {
+                    // Nessun budget precedente: suggerisci basandoti sulle spese del mese prima
+                    const start = new Date(periodStart);
+                    const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1); prevEnd.setHours(23,59,59,999);
+                    const prevStart = new Date(start); prevStart.setMonth(prevStart.getMonth() - 1);
+                    const prevSpese = {};
+                    transactions
+                        .filter(t => t.type === 'expense' && new Date(t.date) >= prevStart && new Date(t.date) <= prevEnd)
+                        .forEach(t => { prevSpese[t.category] = (prevSpese[t.category] || 0) + t.amount; });
+                    const newAmounts = { ...amounts };
+                    cats.forEach(c => {
+                        if (prevSpese[c.id]) newAmounts[c.id] = String(Math.ceil(prevSpese[c.id] / 10) * 10);
+                    });
+                    setAmounts(newAmounts);
+                }
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
             };
+
+            // Calcola spese del periodo corrente per la progress bar
+            const periodEnd = (() => {
+                if (!periodStart) return new Date();
+                const e = new Date(periodStart);
+                e.setMonth(e.getMonth() + 1);
+                e.setDate(e.getDate() - 1);
+                e.setHours(23,59,59,999);
+                return e;
+            })();
+            const periodTx = transactions.filter(t => {
+                const d = new Date(t.date);
+                return t.type === 'expense' && d >= new Date(periodStart) && d <= periodEnd;
+            });
 
             const total = cats.reduce((sum, c) => sum + (parseFloat(amounts[c.id]) || 0), 0);
 
             return (
                 <div className="modal" onClick={onClose}>
                     <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}>
-                        <div className="modal-header">
-                            <h2 className="modal-title">💰 Budget Mensili</h2>
-                            <button className="close-btn" onClick={onClose}>×</button>
+                        <div className="modal-header" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '2px' }}>
+                            <div style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between' }}>
+                                <h2 className="modal-title">💰 Budget</h2>
+                                <button className="close-btn" onClick={onClose}>×</button>
+                            </div>
+                            {periodLabel && (
+                                <div style={{ fontSize: '12px', color: '#888', paddingLeft: '2px' }}>
+                                    📅 {periodLabel}
+                                </div>
+                            )}
                         </div>
 
                         {/* Pulsante copia mese precedente */}
@@ -4046,8 +4119,8 @@
                         <div style={{ overflowY: 'auto', flex: 1, padding: '0 16px' }}>
                             {cats.map(category => {
                                 const val = parseFloat(amounts[category.id]) || 0;
-                                const spent = transactions
-                                    .filter(t => t.type === 'expense' && t.category === category.id)
+                                const spent = periodTx
+                                    .filter(t => t.category === category.id)
                                     .reduce((s, t) => s + t.amount, 0);
                                 const pct = val > 0 ? Math.min((spent / val) * 100, 100) : 0;
                                 const over = val > 0 && spent > val;
@@ -4103,7 +4176,7 @@
                                 <span style={{ fontWeight: 'bold', fontSize: '18px', color: '#667eea' }}>€ {total.toFixed(0)}</span>
                             </div>
                             <button onClick={handleSave} className="submit-btn" style={{ marginTop: 0 }}>
-                                💾 Salva tutti i budget
+                                💾 Salva budget {periodLabel ? `(${new Date(periodStart).toLocaleDateString('it-IT', { month: 'short', year: 'numeric' })})` : ''}
                             </button>
                         </div>
                     </div>
@@ -4407,7 +4480,14 @@
                                                     // Cancella dati account attivo
                                                     const prefix = `account_${activeAccountId}_`;
                                                     window.deleteTransactionsFromDB(activeAccountId);
-                                                    localStorage.removeItem(prefix + 'budgets');
+                                                    // Cancella tutti i budget per periodo
+                                                    const keysToDelete = [];
+                                                    for (let i = 0; i < localStorage.length; i++) {
+                                                        const k = localStorage.key(i);
+                                                        if (k && k.startsWith(prefix + 'budget_')) keysToDelete.push(k);
+                                                    }
+                                                    keysToDelete.forEach(k => localStorage.removeItem(k));
+                                                    localStorage.removeItem(prefix + 'budgets'); // legacy
                                                     localStorage.removeItem(prefix + 'settings');
                                                     localStorage.removeItem(prefix + 'categoryOrder');
                                                     localStorage.removeItem(prefix + 'customCategories');
