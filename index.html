@@ -1252,38 +1252,79 @@
             };
 
             // ============ SWIPE ORIZZONTALE PER NAVIGARE PERIODI ============
-            const swipeState = React.useRef({ startX: 0, startY: 0, active: false });
-            const [swipeAnim, setSwipeAnim] = React.useState(0); // px offset visivo
+            const swipeContainerRef = React.useRef(null);
+            const [swipeAnim, setSwipeAnim] = React.useState(0);
+            const swipeState = React.useRef({
+                active: false,      // swipe orizzontale confermato
+                decided: false,     // abbiamo già deciso orizzontale/verticale
+                startX: 0,
+                startY: 0,
+            });
 
-            const handleSwipeStart = (e) => {
-                if (viewMode === 'all' || viewMode === 'custom') return;
-                const touch = e.touches[0];
-                swipeState.current = { startX: touch.clientX, startY: touch.clientY, active: true };
-            };
+            React.useEffect(() => {
+                const el = swipeContainerRef.current;
+                if (!el) return;
 
-            const handleSwipeMove = (e) => {
-                if (!swipeState.current.active) return;
-                const dx = e.touches[0].clientX - swipeState.current.startX;
-                const dy = e.touches[0].clientY - swipeState.current.startY;
-                // Se lo scroll verticale è predominante, non attivare swipe
-                if (Math.abs(dy) > Math.abs(dx) + 10) {
-                    swipeState.current.active = false;
+                const onStart = (e) => {
+                    if (e.touches.length !== 1) return;
+                    swipeState.current = {
+                        active: false,
+                        decided: false,
+                        startX: e.touches[0].clientX,
+                        startY: e.touches[0].clientY,
+                    };
+                };
+
+                const onMove = (e) => {
+                    if (viewMode === 'all' || viewMode === 'custom') return;
+                    const s = swipeState.current;
+                    const dx = e.touches[0].clientX - s.startX;
+                    const dy = e.touches[0].clientY - s.startY;
+
+                    if (!s.decided) {
+                        // Decidi dopo almeno 8px di movimento
+                        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+                        if (Math.abs(dx) > Math.abs(dy)) {
+                            s.decided = true;
+                            s.active = true;  // è orizzontale
+                        } else {
+                            s.decided = true;
+                            s.active = false; // è verticale, lascia scorrere
+                        }
+                    }
+
+                    if (!s.active) return;
+
+                    // Blocca lo scroll verticale
+                    e.preventDefault();
+                    // Feedback visivo con resistenza ai bordi
+                    const resistance = 0.35;
+                    setSwipeAnim(dx * resistance);
+                };
+
+                const onEnd = (e) => {
+                    const s = swipeState.current;
+                    if (!s.active) { setSwipeAnim(0); return; }
+                    const dx = e.changedTouches[0].clientX - s.startX;
+                    s.active = false;
+                    s.decided = false;
                     setSwipeAnim(0);
-                    return;
-                }
-                if (Math.abs(dx) > 10) setSwipeAnim(dx * 0.3); // feedback visivo attenuato
-            };
+                    if (Math.abs(dx) > 50) {
+                        if (dx < 0) goToNextPeriod();
+                        else goToPreviousPeriod();
+                    }
+                };
 
-            const handleSwipeEnd = (e) => {
-                if (!swipeState.current.active) { setSwipeAnim(0); return; }
-                const dx = e.changedTouches[0].clientX - swipeState.current.startX;
-                setSwipeAnim(0);
-                swipeState.current.active = false;
-                if (Math.abs(dx) > 60) {
-                    if (dx < 0) goToNextPeriod();     // swipe sinistra → periodo successivo
-                    else goToPreviousPeriod();          // swipe destra → periodo precedente
-                }
-            };
+                el.addEventListener('touchstart', onStart, { passive: true });
+                el.addEventListener('touchmove', onMove, { passive: false });
+                el.addEventListener('touchend', onEnd, { passive: true });
+
+                return () => {
+                    el.removeEventListener('touchstart', onStart);
+                    el.removeEventListener('touchmove', onMove);
+                    el.removeEventListener('touchend', onEnd);
+                };
+            }, [viewMode, periodOffset, currentPage]);
 
             const formatPeriodDisplay = () => {
                 if (viewMode === 'all') return 'Tutti i movimenti';
@@ -2264,10 +2305,8 @@
 
                     {currentPage === 'home' && (
                         <div
-                            onTouchStart={handleSwipeStart}
-                            onTouchMove={handleSwipeMove}
-                            onTouchEnd={handleSwipeEnd}
-                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.2s ease' : 'none' }}
+                            ref={swipeContainerRef}
+                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.25s cubic-bezier(0.25,0.46,0.45,0.94)' : 'none', willChange: 'transform' }}
                         >
                             <div className="tabs">
                                 <button 
@@ -2372,10 +2411,8 @@
 
                     {currentPage === 'budget' && (
                         <div
-                            onTouchStart={handleSwipeStart}
-                            onTouchMove={handleSwipeMove}
-                            onTouchEnd={handleSwipeEnd}
-                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.2s ease' : 'none' }}
+                            ref={currentPage === 'budget' ? swipeContainerRef : null}
+                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.25s cubic-bezier(0.25,0.46,0.45,0.94)' : 'none', willChange: 'transform' }}
                         >
                         <BudgetPage 
                             budgets={budgets}
