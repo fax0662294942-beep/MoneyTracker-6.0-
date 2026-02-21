@@ -1251,6 +1251,40 @@
                 setPeriodOffset(0);
             };
 
+            // ============ SWIPE ORIZZONTALE PER NAVIGARE PERIODI ============
+            const swipeState = React.useRef({ startX: 0, startY: 0, active: false });
+            const [swipeAnim, setSwipeAnim] = React.useState(0); // px offset visivo
+
+            const handleSwipeStart = (e) => {
+                if (viewMode === 'all' || viewMode === 'custom') return;
+                const touch = e.touches[0];
+                swipeState.current = { startX: touch.clientX, startY: touch.clientY, active: true };
+            };
+
+            const handleSwipeMove = (e) => {
+                if (!swipeState.current.active) return;
+                const dx = e.touches[0].clientX - swipeState.current.startX;
+                const dy = e.touches[0].clientY - swipeState.current.startY;
+                // Se lo scroll verticale è predominante, non attivare swipe
+                if (Math.abs(dy) > Math.abs(dx) + 10) {
+                    swipeState.current.active = false;
+                    setSwipeAnim(0);
+                    return;
+                }
+                if (Math.abs(dx) > 10) setSwipeAnim(dx * 0.3); // feedback visivo attenuato
+            };
+
+            const handleSwipeEnd = (e) => {
+                if (!swipeState.current.active) { setSwipeAnim(0); return; }
+                const dx = e.changedTouches[0].clientX - swipeState.current.startX;
+                setSwipeAnim(0);
+                swipeState.current.active = false;
+                if (Math.abs(dx) > 60) {
+                    if (dx < 0) goToNextPeriod();     // swipe sinistra → periodo successivo
+                    else goToPreviousPeriod();          // swipe destra → periodo precedente
+                }
+            };
+
             const formatPeriodDisplay = () => {
                 if (viewMode === 'all') return 'Tutti i movimenti';
                 if (viewMode === 'custom' && (!customDateRange.start || !customDateRange.end)) return 'Scegli date...';
@@ -2229,7 +2263,12 @@
                     )}
 
                     {currentPage === 'home' && (
-                        <>
+                        <div
+                            onTouchStart={handleSwipeStart}
+                            onTouchMove={handleSwipeMove}
+                            onTouchEnd={handleSwipeEnd}
+                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.2s ease' : 'none' }}
+                        >
                             <div className="tabs">
                                 <button 
                                     className={`tab ${activeTab === 'transactions' ? 'active' : ''}`}
@@ -2328,16 +2367,23 @@
                                     );
                                 })()}
                             </div>
-                        </>
+                        </div>
                     )}
 
                     {currentPage === 'budget' && (
+                        <div
+                            onTouchStart={handleSwipeStart}
+                            onTouchMove={handleSwipeMove}
+                            onTouchEnd={handleSwipeEnd}
+                            style={{ transform: `translateX(${swipeAnim}px)`, transition: swipeAnim === 0 ? 'transform 0.2s ease' : 'none' }}
+                        >
                         <BudgetPage 
                             budgets={budgets}
                             expenses={getMonthlyExpensesByCategory()}
                             onSetBudget={setBudget}
                             onOpenModal={() => setShowBudgetModal(true)}
                         />
+                        </div>
                     )}
 
                     {currentPage === 'stats' && (
