@@ -1115,7 +1115,14 @@
             const getPeriodDates = () => {
                 const today = new Date();
                 let startDate, endDate;
-                
+
+                if (viewMode === 'all') {
+                    return {
+                        startDate: new Date(0),
+                        endDate: new Date(9999, 11, 31, 23, 59, 59, 999)
+                    };
+                }
+
                 if (viewMode === 'custom' && customDateRange.start && customDateRange.end) {
                     return {
                         startDate: new Date(customDateRange.start),
@@ -1210,20 +1217,12 @@
                 setPeriodOffset(0);
             };
 
-            // Formatta il periodo per visualizzazione
             const formatPeriodDisplay = () => {
+                if (viewMode === 'all') return 'Tutti i movimenti';
+                if (viewMode === 'custom' && (!customDateRange.start || !customDateRange.end)) return 'Scegli date...';
                 const { startDate, endDate } = getPeriodDates();
-                
-                if (viewMode === 'year') {
-                    return startDate.getFullYear().toString();
-                } else if (viewMode === 'week') {
-                    return `${startDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })} - ${endDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-                } else if (viewMode === 'custom') {
-                    return `${startDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })} - ${endDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-                } else {
-                    // Mese personalizzato
-                    return `${startDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })} - ${endDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}`;
-                }
+                if (viewMode === 'year') return startDate.getFullYear().toString();
+                return `${startDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' })} - ${endDate.toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' })}`;
             };
 
             const getMonthlyExpensesByCategory = () => {
@@ -2016,34 +2015,58 @@
                                 ))}
                             </select>
                             
-                            <select 
-                                value={viewMode}
-                                onChange={(e) => {
-                                    setViewMode(e.target.value);
-                                    setPeriodOffset(0);
-                                }}
-                                style={{
-                                    background: 'rgba(255,255,255,0.9)',
-                                    border: 'none',
-                                    padding: '8px 12px',
-                                    borderRadius: '8px',
-                                    fontSize: '14px',
-                                    fontWeight: '600',
-                                    cursor: 'pointer'
-                                }}
-                            >
-                                <option value="month">📅 Mese</option>
-                                <option value="week">📆 Settimana</option>
-                                <option value="year">📊 Anno</option>
-                                <option value="custom">🎯 Personalizzato</option>
-                            </select>
-                            
+                            {/* Selettore periodo: chip */}
+                            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'center', marginBottom: '6px' }}>
+                                {[
+                                    { id: 'week', label: '7g' },
+                                    { id: 'month', label: 'Mese' },
+                                    { id: 'year', label: 'Anno' },
+                                    { id: 'all', label: 'Tutti' },
+                                    { id: 'custom', label: '📅 Date' },
+                                ].map(({ id, label }) => (
+                                    <button
+                                        key={id}
+                                        onClick={() => { setViewMode(id); if (id !== 'custom') setPeriodOffset(0); }}
+                                        style={{
+                                            padding: '5px 13px',
+                                            borderRadius: '20px',
+                                            border: 'none',
+                                            background: viewMode === id ? 'white' : 'rgba(255,255,255,0.25)',
+                                            color: viewMode === id ? '#667eea' : 'white',
+                                            fontWeight: viewMode === id ? 'bold' : 'normal',
+                                            fontSize: '13px',
+                                            cursor: 'pointer',
+                                            transition: 'all 0.15s'
+                                        }}
+                                    >{label}</button>
+                                ))}
+                            </div>
+
+                            {/* Date picker inline per custom */}
+                            {viewMode === 'custom' && (
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'center', marginBottom: '4px' }}>
+                                    <input
+                                        type="date"
+                                        value={customDateRange.start || ''}
+                                        onChange={e => setCustomDateRange(prev => ({ ...prev, start: e.target.value }))}
+                                        style={{ padding: '5px 8px', borderRadius: '8px', border: 'none', fontSize: '13px', background: 'rgba(255,255,255,0.9)', color: '#333' }}
+                                    />
+                                    <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: '13px' }}>→</span>
+                                    <input
+                                        type="date"
+                                        value={customDateRange.end || ''}
+                                        onChange={e => setCustomDateRange(prev => ({ ...prev, end: e.target.value }))}
+                                        style={{ padding: '5px 8px', borderRadius: '8px', border: 'none', fontSize: '13px', background: 'rgba(255,255,255,0.9)', color: '#333' }}
+                                    />
+                                </div>
+                            )}
+
                             <div style={{ 
                                 color: 'rgba(255,255,255,0.9)', 
                                 fontSize: '13px', 
-                                marginTop: '10px',
+                                marginTop: '4px',
                                 fontWeight: '500',
-                                display: 'flex',
+                                display: viewMode === 'all' || (viewMode === 'custom') ? 'none' : 'flex',
                                 alignItems: 'center',
                                 gap: '10px'
                             }}>
@@ -2105,6 +2128,13 @@
                                     </button>
                                 )}
                             </div>
+
+                            {/* Label periodo per 'all' e 'custom' con date valide */}
+                            {(viewMode === 'all' || (viewMode === 'custom' && customDateRange.start && customDateRange.end)) && (
+                                <div style={{ textAlign: 'center', color: 'rgba(255,255,255,0.9)', fontSize: '13px', fontWeight: '500', marginTop: '2px' }}>
+                                    {formatPeriodDisplay()}
+                                </div>
+                            )}
                         </div>
                     </div>
 
