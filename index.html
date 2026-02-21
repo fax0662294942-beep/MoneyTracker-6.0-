@@ -918,13 +918,49 @@
         const getCustomTransactionAccounts = () => {
             try {
                 const stored = localStorage.getItem('customTransactionAccounts');
-                if (stored) return JSON.parse(stored);
+                if (stored) {
+                    const parsed = JSON.parse(stored);
+                    return parsed.map(a => ({
+                        tipologia: 'normale',
+                        archived: false,
+                        order: 999,
+                        includeInTotal: true,
+                        ...a
+                    }));
+                }
             } catch(e) {}
             return [];
         };
 
         const saveCustomTransactionAccounts = (accs) => {
             localStorage.setItem('customTransactionAccounts', JSON.stringify(accs));
+        };
+
+        // ============ TAG SYSTEM ============
+        const getTagsFromStorage = () => {
+            try {
+                const stored = localStorage.getItem('moneyTrackerTags');
+                if (stored) return JSON.parse(stored);
+            } catch(e) {}
+            return []; // Lista di { id, name, color }
+        };
+
+        const saveTagsToStorage = (tags) => {
+            localStorage.setItem('moneyTrackerTags', JSON.stringify(tags));
+        };
+
+        const getOrCreateTag = (name) => {
+            if (!name || !name.trim()) return null;
+            const key = name.trim().toLowerCase();
+            const tags = getTagsFromStorage();
+            const existing = tags.find(t => t.name.toLowerCase() === key);
+            if (existing) return existing.id;
+            const TAG_COLORS = ['#667eea','#f093fb','#4facfe','#43e97b','#fa709a','#fee140','#30cfd0','#a18cd1','#fda085','#84fab0'];
+            const id = 'tag_' + key.replace(/[^a-z0-9]/g, '_') + '_' + Date.now();
+            const color = TAG_COLORS[tags.length % TAG_COLORS.length];
+            tags.push({ id, name: name.trim(), color });
+            saveTagsToStorage(tags);
+            return id;
         };
 
         // Per compatibilità legacy - versione senza Proxy (più sicura con Babel)
@@ -1415,13 +1451,14 @@
 
                             if (fields.length < 5) continue;
 
-                            // Colonne 1Money CSV: Data, Tipologia, Dal conto, Al conto/Categoria, Importo, Valuta, ..., Note
-                            const data            = fields[0] || '';
-                            const tipologia       = fields[1] || '';
-                            const dalConto        = fields[2] || '';
+                            // Colonne 1Money CSV: Data, Tipologia, Dal conto, Al conto/Categoria, Importo, Valuta, Tasso, Conto2, Tag, Note
+                            const data             = fields[0] || '';
+                            const tipologia        = fields[1] || '';
+                            const dalConto         = fields[2] || '';
                             const alContoCategoria = fields[3] || '';
-                            const importo         = fields[4] || '0';
-                            const note            = fields[9] || fields[8] || fields[7] || '';
+                            const importo          = fields[4] || '0';
+                            const tagRaw           = fields[8] || '';
+                            const note             = fields[9] || fields[7] || '';
 
                             // Salta trasferimenti
                             if (tipologia === 'Trasferimento' || tipologia.toLowerCase().includes('transfer')) {
@@ -1460,9 +1497,19 @@
                                 finalNote = subCat + (finalNote ? ' · ' + finalNote : '');
                             }
 
+                            // Tag: possono essere separati da virgola o punto e virgola
+                            const tagIds = [];
+                            if (tagRaw.trim()) {
+                                const tagNames = tagRaw.split(/[,;]/).map(t => t.trim()).filter(Boolean);
+                                tagNames.forEach(tagName => {
+                                    const tagId = getOrCreateTag(tagName);
+                                    if (tagId) tagIds.push(tagId);
+                                });
+                            }
+
                             // Importo
                             const amount = Math.abs(parseFloat(importo.replace(',', '.')) || 0);
-                            if (amount === 0) continue; // salta importi zero
+                            if (amount === 0) continue;
 
                             importedTransactions.push({
                                 id: Date.now() + i + Math.random(),
@@ -1471,7 +1518,8 @@
                                 category: categoryId,
                                 account: accountId,
                                 note: finalNote,
-                                date: dateObj.toISOString()
+                                date: dateObj.toISOString(),
+                                tags: tagIds
                             });
 
                         } catch (err) {
@@ -2075,6 +2123,30 @@
                         </div>
                     </div>
 
+                    {currentPage === 'accounts' && (
+                        <AccountsView
+                            transactions={filteredTransactions}
+                            onAdjustBalance={(accId, amount, note) => {
+                                const t = {
+                                    id: Date.now(),
+                                    type: amount >= 0 ? 'income' : 'expense',
+                                    amount: Math.abs(amount),
+                                    category: amount >= 0 ? 'other' : 'other',
+                                    account: accId,
+                                    note: note || '⚖️ Aggiustamento saldo',
+                                    date: new Date().toISOString(),
+                                    isBalanceAdjustment: true
+                                };
+                                setTransactions(prev => [t, ...prev]);
+                            }}
+                            onUpdateAccount={(updatedAcc) => {
+                                const accs = getCustomTransactionAccounts();
+                                const updated = accs.map(a => a.id === updatedAcc.id ? { ...a, ...updatedAcc } : a);
+                                saveCustomTransactionAccounts(updated);
+                            }}
+                        />
+                    )}
+
                     {currentPage === 'categories' && (
                         <CategoriesView 
                             expenses={getMonthlyExpensesByCategory()}
@@ -2349,6 +2421,13 @@
 
                     <div className="bottom-nav">
                         <button 
+                            className={`nav-item ${currentPage === 'accounts' ? 'active' : ''}`}
+                            onClick={() => setCurrentPage('accounts')}
+                        >
+                            <div className="nav-icon">🏦</div>
+                            <div className="nav-label">Conti</div>
+                        </button>
+                        <button 
                             className={`nav-item ${currentPage === 'categories' ? 'active' : ''}`}
                             onClick={() => setCurrentPage('categories')}
                         >
@@ -2377,6 +2456,413 @@
                             <div className="nav-label">Riepilogo</div>
                         </button>
                     </div>
+                </div>
+            );
+        }
+
+        // ============ ACCOUNTS VIEW ============
+        function AccountsView({ transactions, onAdjustBalance, onUpdateAccount }) {
+            const [accs, setAccs] = React.useState([]);
+            const [selectedAcc, setSelectedAcc] = React.useState(null);
+            const [showAdjust, setShowAdjust] = React.useState(false);
+            const [showArchived, setShowArchived] = React.useState(false);
+            const [draggedId, setDraggedId] = React.useState(null);
+            const [dragOverId, setDragOverId] = React.useState(null);
+            const touchDrag = React.useRef({ active: false, id: null });
+            const [editingAcc, setEditingAcc] = React.useState(null);
+
+            const TIPOLOGIE = [
+                { id: 'normale', label: 'Normale', icon: '🏦' },
+                { id: 'risparmio', label: 'Risparmio', icon: '🐷' },
+                { id: 'carta', label: 'Carta', icon: '💳' },
+                { id: 'contanti', label: 'Contanti', icon: '💵' },
+                { id: 'investimento', label: 'Investimento', icon: '📈' },
+                { id: 'debito', label: 'Debito', icon: '⚠️' },
+            ];
+
+            const reload = () => setAccs([...getCustomTransactionAccounts()]);
+
+            React.useEffect(() => { reload(); }, []);
+
+            // Calcola saldo per ogni conto
+            const getSaldo = (accId) => {
+                return transactions
+                    .filter(t => t.account === accId)
+                    .reduce((sum, t) => sum + (t.type === 'income' ? t.amount : -t.amount), 0);
+            };
+
+            // Saldo totale (solo conti inclusi nel totale, non archiviati)
+            const totaleSaldo = accs
+                .filter(a => !a.archived && a.includeInTotal !== false)
+                .reduce((sum, a) => sum + getSaldo(a.id), 0);
+
+            const activeAccs = accs
+                .filter(a => !a.archived)
+                .sort((a, b) => (a.order || 999) - (b.order || 999));
+            const archivedAccs = accs.filter(a => a.archived);
+
+            // Raggruppa per tipologia
+            const byTipologia = {};
+            TIPOLOGIE.forEach(t => { byTipologia[t.id] = []; });
+            activeAccs.forEach(a => {
+                const tip = a.tipologia || 'normale';
+                if (!byTipologia[tip]) byTipologia[tip] = [];
+                byTipologia[tip].push(a);
+            });
+
+            // Drag desktop
+            const handleDragStart = (e, id) => { setDraggedId(id); e.dataTransfer.effectAllowed = 'move'; };
+            const handleDragOver = (e, id) => { e.preventDefault(); setDragOverId(id); };
+            const handleDrop = (e, targetId) => {
+                e.preventDefault();
+                if (!draggedId || draggedId === targetId) { setDraggedId(null); setDragOverId(null); return; }
+                const all = getCustomTransactionAccounts();
+                const from = all.findIndex(a => a.id === draggedId);
+                const to = all.findIndex(a => a.id === targetId);
+                if (from < 0 || to < 0) return;
+                const newOrder = [...all];
+                const [removed] = newOrder.splice(from, 1);
+                newOrder.splice(to, 0, removed);
+                newOrder.forEach((a, i) => { a.order = i; });
+                saveCustomTransactionAccounts(newOrder);
+                reload();
+                setDraggedId(null); setDragOverId(null);
+            };
+            // Touch drag
+            const handleTouchStart = (e, id) => { touchDrag.current = { active: true, id }; };
+            const handleTouchMove = (e) => {
+                if (!touchDrag.current.active) return;
+                e.preventDefault();
+                const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+                const card = el && el.closest('[data-accid]');
+                if (card) setDragOverId(card.dataset.accid);
+            };
+            const handleTouchEnd = () => {
+                if (touchDrag.current.active && dragOverId && touchDrag.current.id !== dragOverId) {
+                    const all = getCustomTransactionAccounts();
+                    const from = all.findIndex(a => a.id === touchDrag.current.id);
+                    const to = all.findIndex(a => a.id === dragOverId);
+                    if (from >= 0 && to >= 0) {
+                        const newOrder = [...all];
+                        const [removed] = newOrder.splice(from, 1);
+                        newOrder.splice(to, 0, removed);
+                        newOrder.forEach((a, i) => { a.order = i; });
+                        saveCustomTransactionAccounts(newOrder);
+                        reload();
+                    }
+                }
+                touchDrag.current = { active: false, id: null };
+                setDraggedId(null); setDragOverId(null);
+            };
+
+            const renderAccCard = (acc) => {
+                const saldo = getSaldo(acc.id);
+                const isDragging = draggedId === acc.id;
+                const isOver = dragOverId === acc.id && !isDragging;
+                return (
+                    <div
+                        key={acc.id}
+                        data-accid={acc.id}
+                        draggable="true"
+                        onDragStart={e => handleDragStart(e, acc.id)}
+                        onDragOver={e => handleDragOver(e, acc.id)}
+                        onDrop={e => handleDrop(e, acc.id)}
+                        onDragEnd={() => { setDraggedId(null); setDragOverId(null); }}
+                        onTouchStart={e => handleTouchStart(e, acc.id)}
+                        onTouchMove={handleTouchMove}
+                        onTouchEnd={handleTouchEnd}
+                        onClick={() => setSelectedAcc(acc)}
+                        style={{
+                            background: 'white',
+                            borderRadius: '14px',
+                            padding: '14px 16px',
+                            marginBottom: '10px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '14px',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.07)',
+                            border: isOver ? '2px dashed #667eea' : '2px solid transparent',
+                            transform: isOver ? 'scale(1.02)' : isDragging ? 'scale(0.97)' : 'scale(1)',
+                            opacity: isDragging ? 0.4 : 1,
+                            cursor: 'grab',
+                            transition: 'transform 0.15s, opacity 0.15s'
+                        }}
+                    >
+                        <div style={{
+                            width: '46px', height: '46px', borderRadius: '12px',
+                            background: acc.color || '#667eea',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: '22px', flexShrink: 0
+                        }}>{acc.icon || '🏦'}</div>
+                        <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 'bold', fontSize: '15px' }}>{acc.name}</div>
+                            <div style={{ fontSize: '11px', color: '#999', marginTop: '2px' }}>
+                                {TIPOLOGIE.find(t => t.id === (acc.tipologia || 'normale'))?.label || 'Normale'}
+                            </div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontWeight: 'bold', fontSize: '16px', color: saldo >= 0 ? '#4CAF50' : '#f44336' }}>
+                                {saldo >= 0 ? '' : '-'}€ {Math.abs(saldo).toFixed(2)}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            // Modal dettaglio conto
+            const AccDetailModal = () => {
+                const [adjustAmt, setAdjustAmt] = React.useState('');
+                const [adjustNote, setAdjustNote] = React.useState('');
+                const [tab, setTab] = React.useState('detail'); // detail | adjust | edit
+                const [editName, setEditName] = React.useState(selectedAcc?.name || '');
+                const [editTip, setEditTip] = React.useState(selectedAcc?.tipologia || 'normale');
+                const [editInclude, setEditInclude] = React.useState(selectedAcc?.includeInTotal !== false);
+                const saldo = getSaldo(selectedAcc?.id);
+                const accTx = transactions.filter(t => t.account === selectedAcc?.id)
+                    .sort((a, b) => new Date(b.date) - new Date(a.date))
+                    .slice(0, 20);
+
+                const saveEdit = () => {
+                    const all = getCustomTransactionAccounts();
+                    const updated = all.map(a => a.id === selectedAcc.id
+                        ? { ...a, name: editName, tipologia: editTip, includeInTotal: editInclude }
+                        : a
+                    );
+                    saveCustomTransactionAccounts(updated);
+                    reload();
+                    setSelectedAcc(null);
+                };
+
+                const archiveAcc = () => {
+                    if (!window.confirm(`Archiviare il conto "${selectedAcc.name}"?`)) return;
+                    const all = getCustomTransactionAccounts();
+                    const updated = all.map(a => a.id === selectedAcc.id ? { ...a, archived: true } : a);
+                    saveCustomTransactionAccounts(updated);
+                    reload();
+                    setSelectedAcc(null);
+                };
+
+                const doAdjust = () => {
+                    const amt = parseFloat(adjustAmt);
+                    if (isNaN(amt) || amt === 0) return;
+                    const diff = amt - saldo;
+                    onAdjustBalance(selectedAcc.id, diff, adjustNote || '⚖️ Aggiustamento saldo');
+                    setSelectedAcc(null);
+                };
+
+                return (
+                    <div className="modal" onClick={() => setSelectedAcc(null)}>
+                        <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxHeight: '90vh', overflow: 'auto' }}>
+                            {/* Header colorato */}
+                            <div style={{
+                                background: selectedAcc?.color || '#667eea',
+                                borderRadius: '12px 12px 0 0',
+                                padding: '20px',
+                                display: 'flex', alignItems: 'center', gap: '14px',
+                                marginTop: '-1px'
+                            }}>
+                                <div style={{ fontSize: '32px' }}>{selectedAcc?.icon || '🏦'}</div>
+                                <div style={{ flex: 1 }}>
+                                    <div style={{ color: 'white', fontWeight: 'bold', fontSize: '20px' }}>{selectedAcc?.name}</div>
+                                    <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>Saldo del conto</div>
+                                    <div style={{ color: 'white', fontWeight: 'bold', fontSize: '22px' }}>
+                                        {saldo >= 0 ? '' : '-'}€ {Math.abs(saldo).toFixed(2)}
+                                    </div>
+                                </div>
+                                <button onClick={() => setSelectedAcc(null)} style={{ background: 'rgba(255,255,255,0.3)', border: 'none', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', color: 'white', fontSize: '18px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>×</button>
+                            </div>
+
+                            {/* Tab bar */}
+                            <div style={{ display: 'flex', borderBottom: '1px solid #eee' }}>
+                                {[['detail','📋 Dettaglio'],['adjust','⚖️ Bilancio'],['edit','✏️ Modifica']].map(([id, label]) => (
+                                    <button key={id} onClick={() => setTab(id)} style={{
+                                        flex: 1, padding: '12px 0', border: 'none', background: 'none',
+                                        fontWeight: tab === id ? 'bold' : 'normal',
+                                        color: tab === id ? '#667eea' : '#666',
+                                        borderBottom: tab === id ? '2px solid #667eea' : '2px solid transparent',
+                                        cursor: 'pointer', fontSize: '12px'
+                                    }}>{label}</button>
+                                ))}
+                            </div>
+
+                            <div style={{ padding: '16px' }}>
+                                {tab === 'detail' && (
+                                    <div>
+                                        <div style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>Ultimi movimenti</div>
+                                        {accTx.length === 0 && <div style={{ color: '#999', textAlign: 'center', padding: '20px' }}>Nessun movimento</div>}
+                                        {accTx.map(t => {
+                                            const cats = getCategoriesFromStorage();
+                                            const cat = (cats[t.type] || []).find(c => c.id === t.category) || { name: 'Altro', icon: '📦', color: '#999' };
+                                            return (
+                                                <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 0', borderBottom: '1px solid #f5f5f5' }}>
+                                                    <div style={{ width: '34px', height: '34px', borderRadius: '8px', background: cat.color + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px' }}>{cat.icon}</div>
+                                                    <div style={{ flex: 1 }}>
+                                                        <div style={{ fontSize: '13px', fontWeight: '500' }}>{cat.name}</div>
+                                                        <div style={{ fontSize: '11px', color: '#999' }}>{new Date(t.date).toLocaleDateString('it-IT')}{t.note ? ' · ' + t.note : ''}</div>
+                                                    </div>
+                                                    <div style={{ fontWeight: 'bold', color: t.type === 'income' ? '#4CAF50' : '#f44336', fontSize: '14px' }}>
+                                                        {t.type === 'income' ? '+' : '-'}€{t.amount.toFixed(2)}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+
+                                {tab === 'adjust' && (
+                                    <div>
+                                        <div style={{ background: '#f3f4f6', borderRadius: '10px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
+                                            <div style={{ fontSize: '12px', color: '#666' }}>Saldo attuale</div>
+                                            <div style={{ fontSize: '22px', fontWeight: 'bold', color: saldo >= 0 ? '#4CAF50' : '#f44336' }}>€ {saldo.toFixed(2)}</div>
+                                        </div>
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '6px' }}>Nuovo saldo corretto</label>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                className="form-input"
+                                                value={adjustAmt}
+                                                onChange={e => setAdjustAmt(e.target.value)}
+                                                placeholder={saldo.toFixed(2)}
+                                            />
+                                        </div>
+                                        <div style={{ marginBottom: '16px' }}>
+                                            <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '6px' }}>Nota (opzionale)</label>
+                                            <input type="text" className="form-input" value={adjustNote} onChange={e => setAdjustNote(e.target.value)} placeholder="es. Controllo estratto conto" />
+                                        </div>
+                                        {adjustAmt && !isNaN(parseFloat(adjustAmt)) && (
+                                            <div style={{ background: '#e8f5e9', borderRadius: '8px', padding: '10px', marginBottom: '12px', fontSize: '13px', color: '#2e7d32', textAlign: 'center' }}>
+                                                Verrà creato un movimento di{' '}
+                                                <strong>{parseFloat(adjustAmt) - saldo >= 0 ? '+' : ''}€{(parseFloat(adjustAmt) - saldo).toFixed(2)}</strong>
+                                            </div>
+                                        )}
+                                        <button onClick={doAdjust} style={{ width: '100%', padding: '12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer', fontSize: '15px' }}>
+                                            ⚖️ Applica correzione
+                                        </button>
+                                    </div>
+                                )}
+
+                                {tab === 'edit' && (
+                                    <div>
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '6px' }}>Nome conto</label>
+                                            <input type="text" className="form-input" value={editName} onChange={e => setEditName(e.target.value)} />
+                                        </div>
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <label style={{ fontSize: '13px', color: '#666', display: 'block', marginBottom: '8px' }}>Tipologia</label>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                                                {TIPOLOGIE.map(tip => (
+                                                    <button key={tip.id} type="button" onClick={() => setEditTip(tip.id)} style={{
+                                                        padding: '8px', border: '2px solid ' + (editTip === tip.id ? '#667eea' : '#e0e0e0'),
+                                                        borderRadius: '8px', background: editTip === tip.id ? '#667eea15' : 'white',
+                                                        cursor: 'pointer', fontSize: '12px', color: editTip === tip.id ? '#667eea' : '#333',
+                                                        fontWeight: editTip === tip.id ? 'bold' : 'normal'
+                                                    }}>
+                                                        {tip.icon} {tip.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 0', borderTop: '1px solid #eee', borderBottom: '1px solid #eee', marginBottom: '16px' }}>
+                                            <span style={{ fontSize: '14px' }}>Includi nel saldo totale</span>
+                                            <button type="button" onClick={() => setEditInclude(!editInclude)} style={{
+                                                width: '48px', height: '26px', borderRadius: '13px', border: 'none',
+                                                background: editInclude ? '#667eea' : '#ccc', cursor: 'pointer', position: 'relative', transition: 'background 0.2s'
+                                            }}>
+                                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: 'white', position: 'absolute', top: '3px', left: editInclude ? '25px' : '3px', transition: 'left 0.2s' }} />
+                                            </button>
+                                        </div>
+                                        <button onClick={saveEdit} style={{ width: '100%', padding: '12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer', marginBottom: '10px', fontSize: '15px' }}>
+                                            💾 Salva modifiche
+                                        </button>
+                                        <button onClick={archiveAcc} style={{ width: '100%', padding: '10px', background: 'white', color: '#FF9800', border: '2px solid #FF9800', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer', fontSize: '14px' }}>
+                                            📦 Archivia conto
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div style={{ padding: '10px', paddingBottom: '80px' }}>
+                    {/* Saldo totale */}
+                    <div style={{
+                        background: 'linear-gradient(135deg, #667eea, #764ba2)',
+                        borderRadius: '16px', padding: '20px', marginBottom: '16px', color: 'white', textAlign: 'center'
+                    }}>
+                        <div style={{ fontSize: '13px', opacity: 0.85 }}>Saldo Totale Conti</div>
+                        <div style={{ fontSize: '32px', fontWeight: 'bold' }}>
+                            {totaleSaldo >= 0 ? '' : '-'}€ {Math.abs(totaleSaldo).toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: '11px', opacity: 0.7, marginTop: '4px' }}>
+                            {activeAccs.filter(a => a.includeInTotal !== false).length} conti inclusi
+                        </div>
+                    </div>
+
+                    {/* Lista per tipologia */}
+                    {TIPOLOGIE.map(tip => {
+                        const tipAccs = byTipologia[tip.id] || [];
+                        if (tipAccs.length === 0) return null;
+                        return (
+                            <div key={tip.id} style={{ marginBottom: '16px' }}>
+                                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#999', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px', paddingLeft: '4px' }}>
+                                    {tip.icon} {tip.label}
+                                </div>
+                                {tipAccs.map(acc => renderAccCard(acc))}
+                            </div>
+                        );
+                    })}
+
+                    {activeAccs.length === 0 && (
+                        <div style={{ textAlign: 'center', padding: '40px 20px', color: '#999' }}>
+                            <div style={{ fontSize: '40px', marginBottom: '10px' }}>🏦</div>
+                            <div>Nessun conto trovato</div>
+                            <div style={{ fontSize: '12px', marginTop: '8px' }}>Importa un CSV o crea un conto dalle impostazioni</div>
+                        </div>
+                    )}
+
+                    {/* Conti archiviati */}
+                    {archivedAccs.length > 0 && (
+                        <div style={{ marginTop: '10px' }}>
+                            <button onClick={() => setShowArchived(!showArchived)} style={{
+                                width: '100%', padding: '10px', background: '#f5f5f5', border: '1px solid #ddd',
+                                borderRadius: '10px', cursor: 'pointer', fontSize: '13px', color: '#666',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+                            }}>
+                                📦 {archivedAccs.length} {archivedAccs.length === 1 ? 'conto archiviato' : 'conti archiviati'}
+                                <span style={{ fontSize: '10px' }}>{showArchived ? '▲' : '▼'}</span>
+                            </button>
+                            {showArchived && archivedAccs.map(acc => {
+                                const saldo = getSaldo(acc.id);
+                                return (
+                                    <div key={acc.id} style={{ background: '#f9f9f9', borderRadius: '12px', padding: '12px 16px', marginTop: '8px', display: 'flex', alignItems: 'center', gap: '12px', opacity: 0.6, border: '1px dashed #ccc' }}>
+                                        <div style={{ fontSize: '22px' }}>{acc.icon || '🏦'}</div>
+                                        <div style={{ flex: 1 }}>
+                                            <div style={{ fontWeight: 'bold', fontSize: '14px' }}>{acc.name}</div>
+                                        </div>
+                                        <div style={{ fontSize: '14px', color: saldo >= 0 ? '#4CAF50' : '#f44336' }}>€{saldo.toFixed(2)}</div>
+                                        <button onClick={() => {
+                                            const all = getCustomTransactionAccounts();
+                                            const updated = all.map(a => a.id === acc.id ? { ...a, archived: false } : a);
+                                            saveCustomTransactionAccounts(updated);
+                                            reload();
+                                        }} style={{ padding: '4px 10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' }}>
+                                            📤 Ripristina
+                                        </button>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    <div style={{ textAlign: 'center', fontSize: '11px', color: '#bbb', marginTop: '12px' }}>
+                        Tocca un conto per dettagli · Trascina per riordinare
+                    </div>
+
+                    {selectedAcc && <AccDetailModal />}
                 </div>
             );
         }
@@ -2421,6 +2907,22 @@
                                         {transaction.note && (
                                             <div className="transaction-date">{transaction.note}</div>
                                         )}
+                                        {transaction.tags && transaction.tags.length > 0 && (
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '3px' }}>
+                                                {transaction.tags.map(tagId => {
+                                                    const tag = getTagsFromStorage().find(t => t.id === tagId);
+                                                    if (!tag) return null;
+                                                    return (
+                                                        <span key={tagId} style={{
+                                                            fontSize: '10px', padding: '1px 7px',
+                                                            borderRadius: '10px', background: tag.color + '25',
+                                                            color: tag.color, border: '1px solid ' + tag.color + '60',
+                                                            fontWeight: 'bold'
+                                                        }}>#{tag.name}</span>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                                 <div>
@@ -2455,8 +2957,11 @@
             const [account, setAccount] = useState('cash');
             const [note, setNote] = useState('');
             const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+            const [selectedTags, setSelectedTags] = useState([]);
+            const [newTagInput, setNewTagInput] = useState('');
             const allAccounts = getAccountsFilter().filter(a => a.id !== 'all');
             const allCategories = getCategoriesFromStorage();
+            const allTags = getTagsFromStorage();
 
             const handleSubmit = (e) => {
                 e.preventDefault();
@@ -2469,10 +2974,26 @@
                     category,
                     account,
                     note,
-                    date: new Date(date).toISOString()
+                    date: new Date(date).toISOString(),
+                    tags: selectedTags
                 };
 
                 onAdd(transaction);
+            };
+
+            const toggleTag = (tagId) => {
+                setSelectedTags(prev =>
+                    prev.includes(tagId) ? prev.filter(t => t !== tagId) : [...prev, tagId]
+                );
+            };
+
+            const handleAddNewTag = () => {
+                if (!newTagInput.trim()) return;
+                const tagId = getOrCreateTag(newTagInput.trim());
+                if (tagId && !selectedTags.includes(tagId)) {
+                    setSelectedTags(prev => [...prev, tagId]);
+                }
+                setNewTagInput('');
             };
 
             return (
@@ -2567,6 +3088,51 @@
                                     onChange={e => setNote(e.target.value)}
                                     placeholder="Aggiungi una nota..."
                                 />
+                            </div>
+
+                            <div className="form-group">
+                                <label className="form-label">Tag (opzionale)</label>
+                                {/* Tag esistenti */}
+                                {allTags.length > 0 && (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+                                        {allTags.map(tag => (
+                                            <button
+                                                key={tag.id}
+                                                type="button"
+                                                onClick={() => toggleTag(tag.id)}
+                                                style={{
+                                                    padding: '4px 10px',
+                                                    borderRadius: '20px',
+                                                    border: '2px solid ' + tag.color,
+                                                    background: selectedTags.includes(tag.id) ? tag.color : 'transparent',
+                                                    color: selectedTags.includes(tag.id) ? 'white' : tag.color,
+                                                    fontSize: '12px',
+                                                    cursor: 'pointer',
+                                                    fontWeight: 'bold'
+                                                }}
+                                            >
+                                                # {tag.name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Crea nuovo tag */}
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={newTagInput}
+                                        onChange={e => setNewTagInput(e.target.value)}
+                                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleAddNewTag(); } }}
+                                        placeholder="Nuovo tag..."
+                                        style={{ flex: 1, marginBottom: 0 }}
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={handleAddNewTag}
+                                        style={{ padding: '8px 14px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+                                    >+ Aggiungi</button>
+                                </div>
                             </div>
 
                             <button type="submit" className="submit-btn">
